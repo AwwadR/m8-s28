@@ -14,9 +14,9 @@
 ## Metrics Table
 
 | Pipeline | recall@5 | MRR | per-query latency (ms) |
-|---|---|---|---|
-| Hybrid (baseline) | 0.85 | 0.6661 | ~low (single-stage retrieval only) |
-| Hybrid + cross-encoder rerank | 0.7833 | 0.6228 | higher (hybrid + rerank stage) |
+|---|---:|---:|---:|
+| Hybrid (lab baseline) | 0.8500 | 0.6661 | Not separately measured |
+| Hybrid + cross-encoder rerank | 0.7833 | 0.6228 | 4337.57 |
 
 The hybrid model performs better overall in both recall@5 and MRR compared to the reranked pipeline. This indicates that in this dataset, the cross-encoder reordering does not consistently improve top-ranked retrieval quality.
 
@@ -40,34 +40,39 @@ This suggests the cross-encoder is not reliably improving semantic reordering in
 
 ## Latency Overhead
 
-The cross-encoder adds a significant computation cost because it evaluates **50 query–document pairs per request**.
+The measured average latency for the rerank pipeline was 4337.57 ms per query
+(approximately 4.34 seconds).
 
-- Hybrid retrieval is relatively fast (single vector + BM25/hybrid search)
-- Cross-encoder reranking adds a second stage of inference over all candidates
+This overhead comes primarily from the cross-encoder stage, which scores 50
+query-document pairs for every query. Unlike the hybrid retrieval stage,
+which retrieves candidates efficiently from Weaviate, the cross-encoder must
+perform transformer inference on each candidate pair.
 
-The overhead is approximately linear in `k_in`, since each query requires scoring 50 pairs regardless of corpus size.
-
-In practice:
-- Hybrid stage scales with corpus size (vector search complexity)
-- Cross-encoder stage scales with `k_in`, not corpus size
-
-Thus, reranking is stable in cost per query but expensive per request.
+The overhead scales approximately linearly with k_in. Doubling k_in from 50
+to 100 would roughly double the amount of cross-encoder work. In contrast,
+the rerank cost is largely independent of corpus size because it only processes
+the retrieved candidates, while the hybrid retrieval stage becomes slower as
+the corpus grows.
 
 ---
 
 ## At What Corpus Size or Query Volume Does It Stop Being Worth It?
 
-The cross-encoder becomes a bottleneck at high query volume (QPS):
+With an average latency of 4337.57 ms per query, a single CPU worker could
+handle only about 0.23 queries per second.
 
-- If one rerank call takes ~O(50 × encoder inference time), latency becomes the limiting factor.
-- At scale (e.g., high traffic systems), this cost accumulates linearly with QPS.
+For low-volume applications where retrieval quality is critical, this cost may
+be acceptable. However, for interactive production systems serving many users,
+the cross-encoder becomes the bottleneck very quickly.
 
-Estimated trade-off:
-- Low QPS systems (<10 QPS): reranking is acceptable for quality gains
-- Medium/high QPS systems (>50 QPS): reranking becomes expensive and requires GPU acceleration or caching
-- Large corpora do not directly increase rerank cost, but they increase hybrid retrieval cost and candidate diversity pressure
+At moderate traffic levels (10+ QPS), multiple workers or GPU acceleration
+would be required. At higher traffic levels (50+ QPS), a full cross-encoder
+rerank stage becomes impractical without aggressive caching, batching, or a
+smaller candidate set.
 
-In real production systems, reranking is typically used only as a **second-stage refinement on a very small candidate set (10–20 instead of 50)** or replaced with lighter models.
+For larger corpora, the hybrid retrieval stage will also become slower,
+further increasing end-to-end latency. In such cases, lighter rerankers or
+learned retrieval approaches may provide a better cost-performance tradeoff.
 
 ---
 

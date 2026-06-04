@@ -17,6 +17,6 @@ print(hybrid)
 print("\n=== RERANK ===")
 rerank = evaluate_retriever(
     "data/retrieval_eval.jsonl",
-    lambda q, k: rerank_search(client, q, embedder, k_in=50, k_out=5)["results"]
+    lambda q, k: rerank_search(client, q, embedder, k_in=50, k_out=5)
 )
 print(rerank)

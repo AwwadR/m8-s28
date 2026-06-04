@@ -37,7 +37,7 @@ rerank_results = evaluate_retriever(
         embedder,
         k_in=50,
         k_out=5,
-    )["results"],
+    ),
 )
 
 print(rerank_results)

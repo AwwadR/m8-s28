@@ -137,12 +137,4 @@ def rerank_search(
 
     t4 = time.perf_counter()
 
-    return {
-        "results": results,
-        "timing": {
-            "hybrid_ms": (t2 - t1) * 1000,
-            "fetch_ms": (t3 - t2) * 1000,
-            "rerank_ms": (t4 - t3) * 1000,
-            "total_ms": (t4 - t0) * 1000,
-        }
-    }
+    return results

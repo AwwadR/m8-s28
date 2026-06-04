@@ -1,41 +1,57 @@
-"""Module 8 — Thursday Stretch (Honors Track): Cross-Encoder Re-Ranking.
+"""
+Module 8 — Thursday Stretch (Honors Track): Cross-Encoder Re-Ranking
 
-Add a cross-encoder re-ranking stage to the lab's hybrid retriever and
-evaluate the cost/benefit. Cross-encoders score (query, passage) pairs
-jointly rather than independently — they produce a more discriminative
-ranking, but at a real latency cost.
-
-Use cross-encoder/ms-marco-MiniLM-L-6-v2 from sentence-transformers.
+Now includes:
+- Cross-encoder re-ranking
+- Efficient batch retrieval from Weaviate
+- Latency tracking (required for evaluation)
 """
 
 from __future__ import annotations
 
+import time
 import weaviate
+from sentence_transformers import CrossEncoder
 
 from retrieval_helpers import hybrid_search
 
 CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+CLASS_NAME = "Post"
+
+# Load once globally
+ce = CrossEncoder(CROSS_ENCODER_MODEL)
 
 
-def cross_encoder_rerank(query: str, candidates: list[dict], k_out: int = 5) -> list[str]:
-    """Re-rank a candidate list using a cross-encoder.
+# =========================
+# CROSS ENCODER RERANKING
+# =========================
 
-    `candidates` is a list of {"doc_id": str, "text": str} (or a similar
-    schema providing the text to score). Score each (query, candidate.text)
-    pair; sort descending; return the top-`k_out` doc_id strings.
+def cross_encoder_rerank(
+    query: str,
+    candidates: list[dict],
+    k_out: int = 5
+) -> list[str]:
+    """Re-rank candidates using cross-encoder."""
+    
+    if not candidates:
+        return []
 
-    Hint:
-        from sentence_transformers import CrossEncoder
-        ce = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-        pairs = [(query, c["text"]) for c in candidates]
-        scores = ce.predict(pairs)
-        # argsort descending, take top k_out, map back to doc_id
-    """
-    # TODO: load CrossEncoder (consider module-level for speed)
-    # TODO: build pairs, score with ce.predict, argsort descending, take top k_out
-    # TODO: return list of doc_id strings
-    raise NotImplementedError("cross_encoder_rerank is not yet implemented")
+    pairs = [(query, c["text"]) for c in candidates]
+    scores = ce.predict(pairs)
 
+    scored = [
+        (c["doc_id"], float(score))
+        for c, score in zip(candidates, scores)
+    ]
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    return [doc_id for doc_id, _ in scored[:k_out]]
+
+
+# =========================
+# MAIN RERANK PIPELINE
+# =========================
 
 def rerank_search(
     client: weaviate.Client,
@@ -43,16 +59,90 @@ def rerank_search(
     embedder,
     k_in: int = 50,
     k_out: int = 5,
-) -> list[str]:
-    """Two-stage retriever: hybrid retrieve k_in, cross-encoder re-rank to k_out.
-
-    Stage 1: hybrid_search(client, query, k_in, embedder, alpha=0.5) -> list[doc_id]
-    Stage 2: resolve each doc_id back to its text from Weaviate
-    Stage 3: cross_encoder_rerank(query, candidates, k_out)
-
-    Return the ordered list of doc_id strings, length <= k_out.
+) -> dict:
     """
-    # TODO: stage 1: hybrid_search to get k_in candidate doc_ids
-    # TODO: resolve each doc_id back to {"doc_id": ..., "text": ...} via Weaviate query
-    # TODO: stage 3: cross_encoder_rerank(query, candidates, k_out)
-    raise NotImplementedError("rerank_search is not yet implemented")
+    Two-stage retrieval:
+    1. Hybrid retrieval (fast)
+    2. Batch fetch from Weaviate (IMPORTANT FIX)
+    3. Cross-encoder reranking
+
+    Returns:
+        {
+            "results": [doc_id],
+            "timing": {
+                "hybrid_ms": ...,
+                "fetch_ms": ...,
+                "rerank_ms": ...,
+                "total_ms": ...
+            }
+        }
+    """
+
+    t0 = time.perf_counter()
+
+    # -------------------------
+    # Stage 1: Hybrid retrieval
+    # -------------------------
+    t1 = time.perf_counter()
+
+    candidate_ids = hybrid_search(
+        client, query, k=k_in, embedder=embedder, alpha=0.5
+    )
+
+    t2 = time.perf_counter()
+
+    # -----------------------------------
+    # Stage 2: Batch fetch from Weaviate
+    # (FIX: avoids N queries loop problem)
+    # -----------------------------------
+    candidates = []
+
+    if candidate_ids:
+        response = (
+            client.query.get(CLASS_NAME, ["doc_id", "text"])
+            .with_where({
+                "path": ["doc_id"],
+                "operator": "ContainsAny",
+                "valueText": candidate_ids
+            })
+            .do()
+        )
+
+        rows = (
+            response.get("data", {})
+            .get("Get", {})
+            .get(CLASS_NAME, [])
+        )
+
+        # map for fast lookup
+        row_map = {r["doc_id"]: r["text"] for r in rows}
+
+        for doc_id in candidate_ids:
+            if doc_id in row_map:
+                candidates.append({
+                    "doc_id": doc_id,
+                    "text": row_map[doc_id]
+                })
+
+    t3 = time.perf_counter()
+
+    # -------------------------
+    # Stage 3: Cross encoder
+    # -------------------------
+    results = cross_encoder_rerank(
+        query=query,
+        candidates=candidates,
+        k_out=k_out
+    )
+
+    t4 = time.perf_counter()
+
+    return {
+        "results": results,
+        "timing": {
+            "hybrid_ms": (t2 - t1) * 1000,
+            "fetch_ms": (t3 - t2) * 1000,
+            "rerank_ms": (t4 - t3) * 1000,
+            "total_ms": (t4 - t0) * 1000,
+        }
+    }
